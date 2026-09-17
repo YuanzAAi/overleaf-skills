@@ -14,7 +14,7 @@ import zipfile
 
 
 REPOSITORY = "YuanzAAi/overleaf-skills"
-FILES = ("SKILL.md", "scripts/overleaf_skill.py", "LICENSE")
+FILES = ("SKILL.md", "scripts/overleaf_skill.py", "install.py", "LICENSE")
 MARKER = ".overleaf-skill.json"
 
 
