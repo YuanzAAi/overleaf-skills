@@ -1,0 +1,4 @@
+interface:
+  display_name: "Overleaf Skills"
+  short_description: "Read, edit and compile Overleaf projects"
+  default_prompt: "Use $overleaf-skills to set Overleaf credentials, create or inspect a project, edit files, upload assets, compile LaTeX, download logs/source/PDF, or clean cache."
