@@ -67,6 +67,3 @@ The default cache is `<agent-home>/overleaf-skills/cache`. `OVERLEAF_SKILL_STATE
 
 Built with reference to [overleaf-mcp-plus](https://pypi.org/project/overleaf-mcp-plus/) and [mjyoo2/OverleafMCP](https://github.com/mjyoo2/OverleafMCP). Unlike their MCP servers, this project exposes a standard-library Python CLI through coding agent skills, uses ZIP snapshots for source reads, and stores one replaceable credential pair per coding agent. It does not include the citation-verification or SyncTeX layout tools available in overleaf-mcp-plus.
 
-## License
-
-[MIT](LICENSE).

@@ -67,6 +67,3 @@ Codex 和 Claude Code 共用脚本和操作说明。安装器为 Codex 安装 `a
 
 本项目参考了 [overleaf-mcp-plus](https://pypi.org/project/overleaf-mcp-plus/) 和 [mjyoo2/OverleafMCP](https://github.com/mjyoo2/OverleafMCP)。与它们的 MCP 服务不同，这里通过 skill 调用标准库 Python CLI，使用 ZIP 快照读取源码，并为每个 coding agent 保存一组可替换凭据。不包含 overleaf-mcp-plus 的文献核验和 SyncTeX 页面布局分析工具。
 
-## 许可证
-
-[MIT](LICENSE)。
