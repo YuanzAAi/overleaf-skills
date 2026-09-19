@@ -1,14 +1,14 @@
 # Overleaf Skills
 
-[简体中文](README.cn.md) · [MIT](LICENSE)
+[简体中文](README.cn.md)
 
 Read, edit and compile Overleaf projects from **Codex** or **Claude Code**. One shared Python CLI, no MCP server and no pip dependencies.
 
 ## Install
 
-Requires **Python 3.10+** and **Git** on your PATH. Run the command for your assistant, then restart its session.
+Requires **Python 3.10+** and **Git** on your PATH. Run the command for your coding agent, then restart its session.
 
-| Assistant | Installation directory |
+| Coding agent | Installation directory |
 | --- | --- |
 | Codex | `~/.codex/skills/overleaf-skills` (`CODEX_HOME` supported) |
 | Claude Code | `~/.claude/skills/overleaf-skills` (`CLAUDE_CONFIG_DIR` supported) |
@@ -33,11 +33,11 @@ curl -fsSL https://raw.githubusercontent.com/YuanzAAi/overleaf-skills/main/insta
 
 These commands download and execute this repository's installer; review [install.py](install.py) first. Add `--update` to update an existing installation, or `--uninstall` to remove skill files. Credential state and project caches are preserved.
 
-Both assistants use the same script and instructions. The installer includes `agents/openai.yaml` for Codex and adds Claude Code's `allowed-tools` frontmatter only to its own installation.
+Both coding agents use the same script and instructions. The installer includes `agents/openai.yaml` for Codex and adds Claude Code's `allowed-tools` frontmatter only to its own installation.
 
 ## Use
 
-Ask your assistant:
+Ask your coding agent:
 
 ```text
 Use overleaf-skills. Set my cookie to overleaf_session2=... and Git token to olp_...
@@ -59,12 +59,14 @@ Full commands: [SKILL.md](SKILL.md), or `python <installed-skill>/scripts/overle
 
 ## Local State
 
-Each assistant uses its own `<assistant-home>/overleaf-skills/state.json`. It is created on first credential setup and contains **plaintext credentials**; keep it private. No credentials are bundled in this repository. `account show` masks values. Explicit arguments override `OVERLEAF_SESSION` / `OVERLEAF_GIT_TOKEN`, which override saved state.
+Each coding agent uses its own `<agent-home>/overleaf-skills/state.json`. It is created on first credential setup and contains **plaintext credentials**; keep it private. No credentials are bundled in this repository. `account show` masks values. Explicit arguments override `OVERLEAF_SESSION` / `OVERLEAF_GIT_TOKEN`, which override saved state.
 
-The default cache is `<assistant-home>/overleaf-skills/cache`. `OVERLEAF_SKILL_STATE_DIR` and `OVERLEAF_SKILL_CACHE_DIR` override state and cache locations. Existing users of the earlier Windows-only cache can retain it by setting `OVERLEAF_SKILL_CACHE_DIR` to its previous location. Optional `OVERLEAF_BASE_URL` and `OVERLEAF_GIT_HOST` select a different server.
+The default cache is `<agent-home>/overleaf-skills/cache`. `OVERLEAF_SKILL_STATE_DIR` and `OVERLEAF_SKILL_CACHE_DIR` override state and cache locations. Existing users of the earlier Windows-only cache can retain it by setting `OVERLEAF_SKILL_CACHE_DIR` to its previous location. Optional `OVERLEAF_BASE_URL` and `OVERLEAF_GIT_HOST` select a different server.
 
 ## Credits
 
-Maintained by [YuanzAAi](https://github.com/YuanzAAi).
+Built with reference to [overleaf-mcp-plus](https://pypi.org/project/overleaf-mcp-plus/) and [mjyoo2/OverleafMCP](https://github.com/mjyoo2/OverleafMCP). Unlike their MCP servers, this project exposes a standard-library Python CLI through coding agent skills, uses ZIP snapshots for source reads, and stores one replaceable credential pair per coding agent. It does not include the citation-verification or SyncTeX layout tools available in overleaf-mcp-plus.
 
-Built with reference to [overleaf-mcp-plus](https://pypi.org/project/overleaf-mcp-plus/) and [mjyoo2/OverleafMCP](https://github.com/mjyoo2/OverleafMCP). Unlike their MCP servers, this project exposes a standard-library Python CLI through assistant skills, uses ZIP snapshots for source reads, and stores one replaceable credential pair per assistant. It does not include the citation-verification or SyncTeX layout tools available in overleaf-mcp-plus.
+## License
+
+[MIT](LICENSE).
