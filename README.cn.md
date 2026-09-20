@@ -63,7 +63,7 @@ Codex 和 Claude Code 共用脚本和操作说明。安装器为 Codex 安装 `a
 
 默认缓存位于 `<agent-home>/overleaf-skills/cache`。可用 `OVERLEAF_SKILL_STATE_DIR` 和 `OVERLEAF_SKILL_CACHE_DIR` 指定状态及缓存位置。旧版 Windows 用户如需继续复用原缓存，可将 `OVERLEAF_SKILL_CACHE_DIR` 指向原位置。`OVERLEAF_BASE_URL` 和 `OVERLEAF_GIT_HOST` 可用于其他服务器。
 
-## 鸣谢
+## 致谢
 
 本项目参考了 [overleaf-mcp-plus](https://pypi.org/project/overleaf-mcp-plus/) 和 [mjyoo2/OverleafMCP](https://github.com/mjyoo2/OverleafMCP)。与它们的 MCP 服务不同，这里通过 skill 调用标准库 Python CLI，使用 ZIP 快照读取源码，并为每个 coding agent 保存一组可替换凭据。不包含 overleaf-mcp-plus 的文献核验和 SyncTeX 页面布局分析工具。
 
