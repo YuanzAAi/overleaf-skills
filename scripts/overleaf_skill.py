@@ -198,7 +198,7 @@ def web_json(method: str, path: str, session: str, body: Any = None, *, token: s
         headers["Content-Type"] = "application/json"
     raw = make_request(method, OVERLEAF_BASE_URL + path, session=session, headers=headers,
                        data=json.dumps(body).encode() if body is not None else None)
-    if not raw or raw.strip() == b"OK":
+    if not raw or raw.strip() in (b"OK", b"Created"):
         return None
     try:
         result = json.loads(raw)
@@ -1295,7 +1295,6 @@ def compile_project(project_id: str, session: str) -> dict[str, Any]:
             "check": "silent",
             "draft": False,
             "incrementalCompilesEnabled": True,
-            "rootDocId": None,
             "stopOnFirstError": False,
         }
     ).encode("utf-8")

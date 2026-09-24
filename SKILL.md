@@ -38,7 +38,7 @@ python <script> restore-project --project-id PROJECT_ID
 python <script> delete-project --project-id PROJECT_ID --confirm-name "My Paper"
 ```
 
-`projects` lists only the active workspace. Archived and trashed projects have separate listings; an archived project in the trash appears only in `trashed-projects`. `restore-project` removes the trash flag; use `unarchive-project` separately if it is also archived. `delete-project` permanently deletes rather than moving to trash. Deletion requires a matching project name; `--force` is only for an independently verified target. `purge-trash --confirm-count N` permanently deletes the current trash after checking its count; inspect `trashed-projects` before using it and stop if a partial deletion is reported.
+`projects` lists only the active workspace. Archived and trashed projects have separate listings; projects in the trash appear only in `trashed-projects`. `restore-project` returns a trashed project to the workspace; `unarchive-project` returns an archived project. `delete-project` permanently deletes rather than moving to trash. Deletion requires a matching project name; `--force` is only for an independently verified target. `purge-trash --confirm-count N` permanently deletes the current trash after checking its count; inspect `trashed-projects` before using it and stop if a partial deletion is reported.
 
 A new blank project often already contains `main.tex`; inspect it before replacement. ZIP import creates a new project, not a merge. Public template-gallery browsing is not implemented.
 
