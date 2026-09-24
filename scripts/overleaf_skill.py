@@ -47,6 +47,12 @@ class SkillError(RuntimeError):
     pass
 
 
+class SkillHttpError(SkillError):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 @dataclasses.dataclass
 class Credentials:
     session: str | None
@@ -181,7 +187,7 @@ def make_request(
             return resp.read()
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:500]
-        raise SkillError(f"HTTP {exc.code} for {url}: {body}") from exc
+        raise SkillHttpError(f"HTTP {exc.code} for {url}: {body}", exc.code) from exc
     except urllib.error.URLError as exc:
         raise SkillError(f"Network error for {url}: {exc}") from exc
 
@@ -1034,12 +1040,6 @@ def command_collaborators(args: argparse.Namespace) -> None:
     action = args.action
     if action in ("list", "invites"):
         result = web_json("GET", base + ("/members" if action == "list" else "/invites"), session)
-    elif action == "invite":
-        if not args.email or not args.privileges:
-            raise SkillError("invite requires --email and --privileges")
-        result = web_json("POST", base + "/invite", session, {"email": args.email, "privileges": args.privileges})
-        if not isinstance(result, dict) or not result.get("invite"):
-            raise SkillError("Invitation was not created; check membership and collaborator limits.")
     elif action in ("set", "remove"):
         if not args.user_id or (action == "set" and not args.privileges):
             raise SkillError("set/remove requires --user-id; set also requires --privileges")
@@ -1047,25 +1047,51 @@ def command_collaborators(args: argparse.Namespace) -> None:
                           {"privilegeLevel": args.privileges} if action == "set" else None)
     else:
         if not args.invite_id:
-            raise SkillError("revoke/resend requires --invite-id")
-        result = web_json("DELETE" if action == "revoke" else "POST",
-                          base + f"/invite/{args.invite_id}" + ("/resend" if action == "resend" else ""), session)
+            raise SkillError("revoke requires --invite-id")
+        result = web_json("DELETE", base + f"/invite/{args.invite_id}", session)
     print_json({"project_id": args.project_id, "action": action, "result": result})
+
+
+def read_sharing_link(project_id: str, session: str) -> dict[str, Any] | None:
+    try:
+        return web_json("GET", f"/project/{project_id}/sharing-link", session)
+    except SkillHttpError as exc:
+        if exc.status != 404:
+            raise
+        page = get_text(f"{OVERLEAF_BASE_URL}/project/{project_id}", session)
+        if extract_meta_content(page, "ol-project_id") != project_id:
+            raise SkillError("Could not verify the project; check its ID and session.") from exc
+        variants = json.loads(extract_meta_content(page, "ol-splitTestVariants") or "{}")
+        if variants.get("sharing-updates-new-link") != "enabled":
+            raise SkillError("Reusable sharing links are not enabled for this account or server; use sharing tokens instead.") from exc
+        return None
 
 
 def command_sharing(args: argparse.Namespace) -> None:
     session = resolve_credentials(args, need_session=True).session or ""
     base = f"/project/{args.project_id}"
-    if args.action in ("tokens", "link"):
-        result = web_json("GET", base + ("/tokens" if args.action == "tokens" else "/sharing-link"), session)
+    if args.action == "tokens":
+        result = web_json("GET", base + "/tokens", session)
+    elif args.action == "link":
+        result = read_sharing_link(args.project_id, session)
     elif args.action == "set-link":
         if not args.privileges:
             raise SkillError("set-link requires --privileges")
+        token = dashboard_csrf_token(session)
         result = web_json("POST", base + "/sharing-link", session,
-                          {"privileges": False if args.privileges == "none" else args.privileges})
+                          {"privileges": False if args.privileges == "none" else args.privileges}, token=token)
+        try:
+            web_json("POST", base + "/settings/admin", session, {"publicAccessLevel": "private"}, token=token)
+        except SkillError as exc:
+            raise SkillError(f"Sharing link updated, but legacy links could not be disabled: {exc}") from exc
     else:
         result = web_json("POST", base + "/settings/admin", session,
                           {"publicAccessLevel": "tokenBased" if args.action == "enable" else "private"})
+    if args.action in ("link", "set-link"):
+        result = result if result is not None else {"privileges": False}
+        enabled = bool(result.get("privileges"))
+        result = {**result, "enabled": enabled,
+                  "url": f"{OVERLEAF_BASE_URL}{base}/share#{urllib.parse.quote(result['token'], safe='')}" if enabled else None}
     print_json({"project_id": args.project_id, "action": args.action, "result": result})
 
 
@@ -1772,9 +1798,8 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--manifest", required=True)
     batch.add_argument("--commit-message", required=True)
 
-    collaborators = project_command("collaborators", "List, invite or manage project collaborators", command_collaborators)
-    collaborators.add_argument("action", choices=("list", "invites", "invite", "set", "remove", "revoke", "resend"))
-    collaborators.add_argument("--email")
+    collaborators = project_command("collaborators", "List and manage project collaborators", command_collaborators)
+    collaborators.add_argument("action", choices=("list", "invites", "set", "remove", "revoke"))
     collaborators.add_argument("--user-id", type=object_id)
     collaborators.add_argument("--invite-id", type=object_id)
     collaborators.add_argument("--privileges", choices=("readOnly", "readAndWrite", "review"))

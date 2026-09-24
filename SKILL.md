@@ -120,12 +120,14 @@ All commands below take `--project-id PROJECT_ID` and use the current session's 
 
 | Command | Actions and arguments |
 | --- | --- |
-| `collaborators` | `list`, `invites`; `invite --email ADDRESS --privileges readOnly\|readAndWrite\|review`; `set --user-id ID --privileges LEVEL`; `remove --user-id ID`; `revoke` or `resend --invite-id ID` |
+| `collaborators` | `list`, `invites`; `set --user-id ID --privileges readOnly\|readAndWrite\|review`; `remove --user-id ID`; `revoke --invite-id ID` |
 | `sharing` | `tokens`, `enable`, `disable` for token links; `link`, `set-link --privileges readOnly\|readAndWrite\|review\|none` for servers offering the sharing-link API |
 | `comments` | `list`; `add --doc-id ID --quote "Exact source text" --content "Comment"`; `reply --thread-id ID --content "Reply"`; `edit --thread-id ID --message-id ID --content "Replacement"`; `delete-message --thread-id ID --message-id ID` |
 | `comments` | `resolve`, `reopen`, `delete-thread`, each with `--doc-id ID --thread-id ID` |
 | `review` | `list --doc-id ID`; `accept` or `reject --doc-id ID --expected-version N --change-id ID` (repeat `--change-id` for multiple changes) |
 | `review tracking` | Read the current setting, or change it with `--enabled true\|false` and either `--user-id ID` or `--guests` |
+
+`sharing link` returns `enabled: false` when no reusable link has been created. `sharing set-link` creates or updates that link and disables legacy token links; `--privileges none` turns link access off. Enabled links include a ready-to-use `url`. Legacy `enable`/`disable` commands only control token links.
 
 Get document IDs from `list-entities`, thread/message IDs from `comments list`, and change IDs plus the current document version from `review list`. Review snapshots may include text marked for deletion. Re-read after edits; change IDs and offsets must come from the same version. Comments accept `--content-file`; repeated quoted text needs `--start` as a UTF-16 offset into the snapshot. A timed-out mutation may already have applied: inspect its result before retrying. Git content edits do not create tracked-change suggestions.
 
