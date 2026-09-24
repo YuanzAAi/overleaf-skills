@@ -53,7 +53,7 @@ Codex 和 Claude Code 共用脚本和操作说明。安装器为 Codex 安装 `a
 | 编辑 | 精确文本替换、章节更新、新建与覆盖文件、二进制上传、删除 |
 | 构建 | 编译、下载 PDF 与日志、导出源码 ZIP 或文件夹 |
 | 审阅 | Git 同步、历史、差异，可选的可还原写入检查 |
-| 管理 | 新建与删除项目、替换凭据、清理项目缓存 |
+| 管理 | 新建、复制与删除项目、替换凭据、清理项目缓存 |
 
 完整命令见 [SKILL.md](SKILL.md)，或运行 `python <安装目录>/scripts/overleaf_skill.py --help`，macOS 使用 `python3`。
 

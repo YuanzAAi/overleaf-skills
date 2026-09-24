@@ -235,15 +235,19 @@ def download_zip_bytes(project_id: str, session: str, timeout: int = 120) -> byt
     )
 
 
-def create_project_web(name: str, session: str, template: str | None = None) -> dict[str, Any]:
-    token = dashboard_csrf_token(session)
+def create_project_web(
+    name: str, session: str, template: str | None = None, *, source_project_id: str | None = None
+) -> dict[str, Any]:
+    operation = "copy-project" if source_project_id else "create-project"
+    token = csrf_token(source_project_id, session) if source_project_id else dashboard_csrf_token(session)
+    endpoint = f"/project/{source_project_id}/clone" if source_project_id else "/project/new"
     form: dict[str, str] = {"projectName": name}
     if template:
         form["template"] = template
     body = urllib.parse.urlencode(form).encode("utf-8")
     raw = make_request(
         "POST",
-        f"{OVERLEAF_BASE_URL}/project/new",
+        f"{OVERLEAF_BASE_URL}{endpoint}",
         session=session,
         headers={
             "Accept": "application/json",
@@ -251,16 +255,20 @@ def create_project_web(name: str, session: str, template: str | None = None) -> 
             "x-csrf-token": token,
         },
         data=body,
-        timeout=60,
+        timeout=300 if source_project_id else 60,
     )
     try:
         data = json.loads(raw.decode("utf-8", errors="replace"))
     except json.JSONDecodeError as exc:
-        raise SkillError(f"create-project returned non-JSON response: {raw[:300]!r}") from exc
+        raise SkillError(f"{operation} returned a non-JSON response; check the project list before retrying.") from exc
+    if not isinstance(data, dict):
+        raise SkillError(f"{operation} returned an invalid response; check the project list before retrying.")
     project_id = data.get("project_id") or data.get("id")
-    if not project_id:
-        raise SkillError(f"create-project response did not include project_id: {data!r}")
-    return {"id": project_id, "name": name, "url": f"{OVERLEAF_BASE_URL}/project/{project_id}"}
+    if not isinstance(project_id, str) or not re.fullmatch(r"[0-9a-fA-F]{24}", project_id):
+        raise SkillError(f"{operation} did not return a valid project ID; check the session and project list before retrying.")
+    if source_project_id and project_id.lower() == source_project_id.lower():
+        raise SkillError("copy-project returned the source project ID instead of a new project.")
+    return {"id": project_id, "name": data.get("name") or name, "url": f"{OVERLEAF_BASE_URL}/project/{project_id}"}
 
 
 def project_name_from_dashboard(project_id: str, session: str) -> str | None:
@@ -695,6 +703,15 @@ def command_create_project(args: argparse.Namespace) -> None:
     print_json(result)
 
 
+def command_copy_project(args: argparse.Namespace) -> None:
+    name = args.name.strip()
+    if not name:
+        raise SkillError("copy-project requires a non-empty --name")
+    creds = resolve_credentials(args, need_session=True)
+    result = create_project_web(name, creds.session or "", source_project_id=args.project_id)
+    print_json(result)
+
+
 def command_delete_project(args: argparse.Namespace) -> None:
     creds = resolve_credentials(args, need_session=True)
     result = delete_project_web(args.project_id, creds.session or "", confirm_name=args.confirm_name, force=args.force)
@@ -1124,6 +1141,11 @@ def build_parser() -> argparse.ArgumentParser:
     create_project.add_argument("--name", required=True)
     create_project.add_argument("--template", help="Optional Overleaf built-in template parameter, such as example")
 
+    copy_project = sub.add_parser("copy-project", help="Copy an existing Overleaf project via Web")
+    add_common_auth(copy_project)
+    copy_project.add_argument("--project-id", required=True, help="Source project ID")
+    copy_project.add_argument("--name", required=True, help="Name for the new copy")
+
     delete_project = sub.add_parser("delete-project", help="Delete an Overleaf project via Web")
     add_common_auth(delete_project)
     delete_project.add_argument("--project-id", required=True)
@@ -1302,6 +1324,8 @@ def main(argv: list[str] | None = None) -> int:
             command_account(args)
         elif args.cmd == "create-project":
             command_create_project(args)
+        elif args.cmd == "copy-project":
+            command_copy_project(args)
         elif args.cmd == "delete-project":
             command_delete_project(args)
         elif args.cmd == "projects":

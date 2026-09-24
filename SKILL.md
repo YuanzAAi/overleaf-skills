@@ -1,6 +1,6 @@
 ---
 name: overleaf-skills
-description: Operate Overleaf projects from Codex or Claude Code with session-cookie reads, Git edits, project management, compilation, and source/PDF/log downloads. Use when the user asks to set Overleaf credentials, inspect or edit remote projects, compile LaTeX, download artifacts, or review project history. Prefer local file tools when a project is already downloaded and only local inspection is requested.
+description: Operate Overleaf projects from Codex or Claude Code with session-cookie reads, Git edits, project management, compilation, and source/PDF/log downloads. Use when the user asks to set Overleaf credentials, copy, inspect or edit remote projects, compile LaTeX, download artifacts, or review project history. Prefer local file tools when a project is already downloaded and only local inspection is requested.
 ---
 
 # Overleaf Skills
@@ -26,10 +26,13 @@ Use 24-character hexadecimal project IDs, never filesystem paths or ambiguous pr
 ```sh
 python <script> projects
 python <script> create-project --name "My Paper"
+python <script> copy-project --project-id SOURCE_PROJECT_ID --name "My Paper Copy"
 python <script> delete-project --project-id PROJECT_ID --confirm-name "My Paper"
 ```
 
 A new blank project often already contains `main.tex`; inspect it before replacement. Deletion requires a matching project name; `--force` is only for an independently verified target. Public template-gallery browsing is not implemented.
+
+`copy-project` uses the session cookie and Overleaf's native project copy, preserving files, folders, compiler and main document settings without changing the source. Continue editing and compiling with the returned new `id`, not the source ID. Sharing permissions and project history are not copied. If the request times out, check `projects` before retrying to avoid duplicate copies.
 
 ## Read And Compile
 

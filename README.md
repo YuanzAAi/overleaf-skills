@@ -53,7 +53,7 @@ Use only credentials and projects you are authorized to access. The session cook
 | Edit | Exact text edits, section updates, file creation/replacement, binary uploads, deletion |
 | Build | Compile, download PDF/logs, export source ZIP or directory |
 | Review | Git sync, commit history, diffs, optional reversible write check |
-| Manage | Create/delete projects, replace credentials, clean project caches |
+| Manage | Create/copy/delete projects, replace credentials, clean project caches |
 
 Full commands: [SKILL.md](SKILL.md), or `python <installed-skill>/scripts/overleaf_skill.py --help` (`python3` on macOS).
 
