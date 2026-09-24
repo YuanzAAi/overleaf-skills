@@ -45,7 +45,7 @@ List my projects and read main.tex from the project I select.
 Update the introduction, compile the project and download its PDF.
 ```
 
-Use only credentials and projects you are authorized to access. The session cookie enables project listing, source reads/downloads and compilation; writes/history use Overleaf Git integration, which must be available to your account. Replace the saved pair to switch accounts.
+Use only credentials and projects you are authorized to access. The session cookie enables project management, collaboration, source reads/downloads and compilation; file content edits and Git history use Overleaf Git integration, which must be available to your account. Replace the saved pair to switch accounts.
 
 | Workflow | Included |
 | --- | --- |
@@ -54,6 +54,8 @@ Use only credentials and projects you are authorized to access. The session cook
 | Build | Compile, download PDF/logs, export source ZIP or directory |
 | Review | Git sync, commit history, diffs, optional reversible write check |
 | Manage | Create/copy/delete projects, replace credentials, clean project caches |
+
+Also supports project settings, batch file operations, ZIP import, archives and trash, sharing and collaborative review, and downloads from a saved compile result.
 
 Full commands: [SKILL.md](SKILL.md), or `python <installed-skill>/scripts/overleaf_skill.py --help` (`python3` on macOS).
 

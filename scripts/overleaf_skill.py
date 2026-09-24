@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Overleaf operations for the Codex and Claude Code skill.
 
-The script intentionally separates read and write paths:
-- Web/session-cookie path for project listing, ZIP snapshots, status, read,
-  section parsing, compile, logs, and PDF download.
-- Git-token path only for writes and reversible smoke tests.
+Session-cookie access handles project management, collaboration and compilation.
+Git integration handles file content edits and project history.
 """
 
 from __future__ import annotations
@@ -14,6 +12,8 @@ import base64
 import dataclasses
 import hashlib
 import html
+import http.cookiejar
+import http.cookies
 import io
 import json
 import os
@@ -162,6 +162,7 @@ def make_request(
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
     timeout: int = 60,
+    opener: Any = None,
 ) -> bytes:
     merged = {
         "User-Agent": "Mozilla/5.0 OverleafSkills/1.0",
@@ -173,7 +174,10 @@ def make_request(
         merged.update(headers)
     req = urllib.request.Request(url, data=data, headers=merged, method=method.upper())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        open_url = opener.open if opener else urllib.request.urlopen
+        with open_url(req, timeout=timeout) as resp:
+            if method.upper() != "GET" and urllib.parse.urlsplit(resp.url).path in ("/login", "/register"):
+                raise SkillError("Overleaf session expired; sign in again before retrying.")
             return resp.read()
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:500]
@@ -184,6 +188,206 @@ def make_request(
 
 def get_text(url: str, session: str, timeout: int = 60) -> str:
     return make_request("GET", url, session=session, timeout=timeout).decode("utf-8", errors="replace")
+
+
+def web_json(method: str, path: str, session: str, body: Any = None, *, token: str | None = None) -> Any:
+    headers = {"Accept": "application/json"}
+    if method != "GET":
+        headers["x-csrf-token"] = token or dashboard_csrf_token(session)
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    raw = make_request(method, OVERLEAF_BASE_URL + path, session=session, headers=headers,
+                       data=json.dumps(body).encode() if body is not None else None)
+    if not raw or raw.strip() == b"OK":
+        return None
+    try:
+        result = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise SkillError(f"Unexpected response from {path}; check the session and remote state.") from exc
+    if isinstance(result, dict) and (result.get("error") or result.get("errorReason") or result.get("success") is False):
+        raise SkillError(f"Overleaf rejected {path}: {result.get('error') or result.get('errorReason') or 'operation failed'}")
+    return result
+
+
+def object_id(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-fA-F]{24}", value):
+        raise argparse.ArgumentTypeError("Expected a 24-character hexadecimal ID")
+    return value
+
+
+def project_path(value: str) -> str:
+    if not isinstance(value, str):
+        raise SkillError("Project path must be a string")
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or "\\" in value or ":" in value or "\0" in value or any(
+        part in (".", "..", "") or part.lower() == ".git" for part in value.split("/")
+    ):
+        raise SkillError(f"Invalid project path: {value}")
+    return path.as_posix()
+
+
+class EditorSession:
+    """Short-lived Socket.IO 0.9 polling connection used by the Overleaf editor."""
+
+    def __init__(self, project_id: str, session: str):
+        self.project_id = project_id
+        self.session = session
+        jar = http.cookiejar.CookieJar()
+        cookies = http.cookies.SimpleCookie()
+        cookies.load(cookie_header(session))
+        base = urllib.parse.urlsplit(OVERLEAF_BASE_URL)
+        for name, morsel in cookies.items():
+            jar.set_cookie(http.cookiejar.Cookie(0, name, morsel.value, None, False, base.hostname or "", False,
+                                                False, "/", True, base.scheme == "https", None, True, None, None, {}))
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        self.url = ""
+        self.sequence = 0
+        self.pending: list[str] = []
+        self.applied: list[Any] = []
+
+    def request(self, method: str, url: str, data: str | None = None) -> str:
+        return make_request(method, url, opener=self.opener,
+                            headers={"Content-Type": "text/plain;charset=UTF-8", "Referer": f"{OVERLEAF_BASE_URL}/project/{self.project_id}"},
+                            data=data.encode() if data is not None else None, timeout=30).decode("utf-8")
+
+    def __enter__(self) -> "EditorSession":
+        query = urllib.parse.urlencode({"projectId": self.project_id, "t": int(time.time() * 1000)})
+        handshake = self.request("GET", f"{OVERLEAF_BASE_URL}/socket.io/1/?{query}").split(":", 3)
+        if len(handshake) != 4 or "xhr-polling" not in handshake[3].split(","):
+            raise SkillError("Overleaf editor did not offer Socket.IO polling; check the session.")
+        self.url = f"{OVERLEAF_BASE_URL}/socket.io/1/xhr-polling/{urllib.parse.quote(handshake[0], safe='')}?{query}"
+        try:
+            event = self.wait_event("joinProjectResponse")
+            self.project = event[0]["project"]
+            if self.project.get("_id") != self.project_id:
+                raise SkillError("Editor returned a different project")
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self.url:
+            try:
+                self.request("POST", self.url, "0::")
+            except (SkillError, OSError):
+                pass
+            self.url = ""
+
+    def packet(self) -> str:
+        if not self.pending:
+            payload = self.request("GET", self.url)
+            if not payload:
+                return "8::"
+            # Socket.IO payload lengths are UTF-16 code units, including non-BMP text.
+            if payload.startswith("\ufffd"):
+                raw = payload.encode("utf-16-le")
+                while raw:
+                    end = raw.find(b"\xfd\xff", 2)
+                    if end < 0:
+                        raise SkillError("Invalid editor packet framing")
+                    try:
+                        size = int(raw[2:end].decode("utf-16-le")) * 2
+                    except ValueError as exc:
+                        raise SkillError("Invalid editor packet length") from exc
+                    start = end + 2
+                    if size <= 0 or start + size > len(raw):
+                        raise SkillError("Truncated editor packet")
+                    self.pending.append(raw[start:start + size].decode("utf-16-le"))
+                    raw = raw[start + size:]
+            else:
+                self.pending.append(payload)
+        return self.pending.pop(0)
+
+    def wait_event(self, name: str, ack: str | None = None) -> Any:
+        if name == "otUpdateApplied" and self.applied:
+            return self.applied.pop(0)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            packet = self.packet()
+            if packet.startswith("2:"):
+                self.request("POST", self.url, "2::")
+            elif packet.startswith(("0:", "7:")):
+                raise SkillError("Overleaf editor connection closed; inspect remote state before retrying.")
+            elif ack and (packet == f"6:::{ack}" or packet.startswith(f"6:::{ack}+")):
+                result = json.loads(packet.split("+", 1)[1]) if "+" in packet else []
+                if result and result[0]:
+                    raise SkillError(f"Editor rejected {name}: {result[0]}")
+                return result[1:]
+            elif packet.startswith("5:"):
+                event = json.loads(packet.split(":", 3)[3])
+                if event.get("name") in ("connectionRejected", "otUpdateError"):
+                    raise SkillError(f"Editor rejected operation: {event.get('args')}")
+                if not ack and event.get("name") == name:
+                    return event.get("args", [])
+                if event.get("name") == "otUpdateApplied":
+                    self.applied.append(event.get("args", []))
+        raise SkillError(f"Timed out waiting for {name}; inspect remote state before retrying.")
+
+    def call(self, name: str, *args: Any) -> Any:
+        self.sequence += 1
+        packet = f"5:{self.sequence}+::" + json.dumps({"name": name, "args": args})
+        self.request("POST", self.url, packet)
+        return self.wait_event(name, str(self.sequence))
+
+    def document(self, doc_id: str) -> dict[str, Any]:
+        result = self.call("joinDoc", doc_id, {"supportsHistoryOT": True})
+        if len(result) < 4:
+            raise SkillError("Editor returned an incomplete document")
+        lines, version, _, ranges = result[:4]
+        history = len(result) > 4 and result[4] == "history-ot"
+        content = lines["content"] if history else "\n".join(line.encode("latin1").decode("utf-8") for line in lines)
+        return {"content": content, "version": version, "history": history,
+                "ranges": lines if history else (ranges or {})}
+
+    def apply(self, doc_id: str, version: int, operations: list[dict[str, Any]]) -> None:
+        self.call("applyOtUpdate", doc_id, {"v": version, "op": operations})
+        # RPC acknowledgement queues the update; its broadcast confirms application.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            args = self.wait_event("otUpdateApplied")
+            applied = args[-1] if args else None
+            if (isinstance(applied, dict) and applied.get("doc") == doc_id
+                    and "op" not in applied and applied.get("v", -1) >= version):
+                return
+        raise SkillError("Document update was queued but not confirmed; inspect it before retrying.")
+
+
+def project_entities(project: dict[str, Any]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+
+    def walk(folder: dict[str, Any], prefix: str) -> None:
+        entries.append({"id": folder["_id"], "path": prefix, "type": "folder"})
+        for collection, kind in (("docs", "doc"), ("fileRefs", "file")):
+            for item in folder.get(collection, []):
+                entries.append({"id": item["_id"], "path": prefix + item["name"], "type": kind})
+        for child in folder.get("folders", []):
+            walk(child, prefix + child["name"] + "/")
+
+    for root in project.get("rootFolder", []):
+        walk(root, "")
+    return entries
+
+
+def find_entity(project: dict[str, Any], path: str, kind: str | None = None) -> dict[str, str]:
+    path = "" if path in ("", ".") else project_path(path.rstrip("/"))
+    matches = [entry for entry in project_entities(project)
+               if entry["path"].rstrip("/") == path and (kind is None or entry["type"] == kind)]
+    if len(matches) != 1:
+        raise SkillError(f"Project entity not found or ambiguous: {path}")
+    return matches[0]
+
+
+def project_settings(project: dict[str, Any]) -> dict[str, Any]:
+    root = project.get("rootDoc_id")
+    if isinstance(root, dict):
+        root = root.get("_id")
+    return {"project_id": project["_id"], "name": project.get("name"),
+            "compiler": project.get("compiler"), "image_name": project.get("imageName"),
+            "root_doc_id": root,
+            "main_file": next((e["path"] for e in project_entities(project) if e["id"] == root), None),
+            "public_access_level": project.get("publicAccesLevel"),
+            "track_changes": project.get("trackChangesState")}
 
 
 def extract_meta_content(page_html: str, name: str) -> str | None:
@@ -214,7 +418,7 @@ def dashboard_csrf_token(session: str) -> str:
     return token
 
 
-def list_projects_web(session: str) -> list[dict[str, Any]]:
+def list_projects_web(session: str, state: str = "active") -> list[dict[str, Any]]:
     page = get_text(f"{OVERLEAF_BASE_URL}/project", session=session, timeout=60)
     blob = extract_meta_content(page, "ol-prefetchedProjectsBlob")
     if blob is None:
@@ -223,7 +427,9 @@ def list_projects_web(session: str) -> list[dict[str, Any]]:
         raise SkillError("Could not find projects blob; session may be expired.")
     data = json.loads(blob)
     projects = data if isinstance(data, list) else data.get("projects", [])
-    return [p for p in projects if not p.get("trashed") and not p.get("archived")]
+    return [p for p in projects if state == "all" or
+            (bool(p.get("trashed")) if state == "trashed" else
+             not p.get("trashed") and bool(p.get("archived")) == (state == "archived"))]
 
 
 def download_zip_bytes(project_id: str, session: str, timeout: int = 120) -> bytes:
@@ -272,7 +478,7 @@ def create_project_web(
 
 
 def project_name_from_dashboard(project_id: str, session: str) -> str | None:
-    for project in list_projects_web(session):
+    for project in list_projects_web(session, "all"):
         if project.get("id") == project_id:
             return project.get("name")
     return None
@@ -284,7 +490,7 @@ def delete_project_web(project_id: str, session: str, *, confirm_name: str | Non
         if not confirm_name:
             raise SkillError("delete-project requires --confirm-name PROJECT_NAME or --force")
         if name is None:
-            raise SkillError("Project not found in the active dashboard; verify the ID before using --force")
+            raise SkillError("Project not found in the dashboard; verify the ID before using --force")
         if confirm_name != name:
             raise SkillError(f"Project name confirmation mismatch: expected {name!r}, got {confirm_name!r}")
     token = csrf_token(project_id, session)
@@ -314,20 +520,6 @@ def zip_snapshot(project_id: str, session: str) -> tuple[list[str], bytes]:
     data = download_zip_bytes(project_id, session)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         return safe_zip_names(zf), data
-
-
-def choose_main_file(files: list[str]) -> str | None:
-    tex = [f for f in files if f.lower().endswith(".tex")]
-    if not tex:
-        return None
-    for exact in ("main.tex", "JNUThesis.tex", "thesis.tex"):
-        for f in tex:
-            if PurePosixPath(f).name == exact:
-                return f
-    for f in tex:
-        if "main" in PurePosixPath(f).name.lower():
-            return f
-    return tex[0]
 
 
 def read_from_zip(zip_data: bytes, file_path: str) -> str:
@@ -560,28 +752,18 @@ def ensure_repo(project_id: str, git_token: str, *, clone_timeout: int, pull_tim
 
 def safe_repo_path(repo: Path, file_path: str) -> Path:
     root = repo.resolve()
-    target = (repo / PurePosixPath(file_path).as_posix()).resolve()
+    target = (repo / project_path(file_path)).resolve()
     try:
-        target.relative_to(root)
+        relative = target.relative_to(root)
+        if any(part.lower() == ".git" for part in relative.parts):
+            raise SkillError("Cannot edit Git metadata")
     except ValueError as exc:
         raise SkillError(f"Path escapes repository root: {file_path}") from exc
     return target
 
 
 def git_commit_push(repo: Path, file_path: str, message: str, git_token: str, *, push_timeout: int) -> dict[str, Any]:
-    add = run_git(["-C", str(repo), "add", "--", file_path], git_token=git_token, timeout=30)
-    if add.returncode != 0:
-        raise SkillError("git add failed: " + sanitize_output(add.stderr or add.stdout, git_token))
-    commit = run_git(["-C", str(repo), "commit", "-m", message], git_token=git_token, timeout=60)
-    if commit.returncode != 0:
-        out = commit.stderr or commit.stdout
-        if "nothing to commit" in out:
-            return {"committed": False, "pushed": False, "message": "No changes to commit"}
-        raise SkillError("git commit failed: " + sanitize_output(out, git_token))
-    push = run_git(["-C", str(repo), "push"], git_token=git_token, timeout=push_timeout)
-    if push.returncode != 0:
-        raise SkillError("git push failed: " + sanitize_output(push.stderr or push.stdout, git_token))
-    return {"committed": True, "pushed": True, "push": sanitize_output(push.stdout or push.stderr, git_token)}
+    return git_commit_push_paths(repo, [file_path], message, git_token, push_timeout=push_timeout)
 
 
 def git_commit_push_paths(repo: Path, file_paths: list[str], message: str, git_token: str, *, push_timeout: int) -> dict[str, Any]:
@@ -685,7 +867,8 @@ def command_account(args: argparse.Namespace) -> None:
 
 def command_projects(args: argparse.Namespace) -> None:
     creds = resolve_credentials(args, need_session=True)
-    projects = list_projects_web(creds.session or "")
+    state = {"archived-projects": "archived", "trashed-projects": "trashed"}.get(args.cmd, "active")
+    projects = list_projects_web(creds.session or "", state)
     print_json(
         {
             "count": len(projects),
@@ -718,11 +901,337 @@ def command_delete_project(args: argparse.Namespace) -> None:
     print_json(result)
 
 
+def command_manage_project(args: argparse.Namespace) -> None:
+    session = resolve_credentials(args, need_session=True).session or ""
+    actions = {"archive-project": ("POST", "archive"), "unarchive-project": ("DELETE", "archive"),
+               "trash-project": ("POST", "trash"), "restore-project": ("DELETE", "trash"),
+               "rename-project": ("POST", "rename")}
+    method, suffix = actions[args.cmd]
+    body = None
+    if args.cmd == "rename-project":
+        if not args.name.strip():
+            raise SkillError("Project name cannot be empty")
+        body = {"newProjectName": args.name.strip()}
+    web_json(method, f"/project/{args.project_id}/{suffix}", session, body)
+    print_json({"project_id": args.project_id, "action": args.cmd, "completed": True})
+
+
+def command_purge_trash(args: argparse.Namespace) -> None:
+    session = resolve_credentials(args, need_session=True).session or ""
+    projects = list_projects_web(session, "trashed")
+    if args.confirm_count != len(projects):
+        raise SkillError(f"Trash contains {len(projects)} projects; inspect trashed-projects and provide the matching --confirm-count")
+    token = dashboard_csrf_token(session)
+    deleted = []
+    for project in projects:
+        try:
+            project_id = object_id(project["id"])
+            web_json("DELETE", f"/project/{project_id}", session, token=token)
+            deleted.append(project_id)
+        except (SkillError, OSError, argparse.ArgumentTypeError) as exc:
+            raise SkillError(f"Trash cleanup stopped; deleted project IDs: {deleted}; {exc}") from exc
+    print_json({"deleted": deleted, "count": len(deleted)})
+
+
+def command_project_settings(args: argparse.Namespace) -> None:
+    session = resolve_credentials(args, need_session=True).session or ""
+    with EditorSession(args.project_id, session) as editor:
+        body = {key: value.lower() for key, value in (("compiler", args.compiler), ("imageName", args.image_name)) if value is not None}
+        if args.main_file:
+            body["rootDocId"] = find_entity(editor.project, args.main_file, "doc")["id"]
+        if body:
+            web_json("POST", f"/project/{args.project_id}/settings", session, body)
+        else:
+            settings = project_settings(editor.project)
+            page = get_text(f"{OVERLEAF_BASE_URL}/project/{args.project_id}", session)
+            settings["available_images"] = json.loads(extract_meta_content(page, "ol-imageNames") or "[]")
+            print_json(settings)
+            return
+    with EditorSession(args.project_id, session) as editor:
+        settings = project_settings(editor.project)
+        for key, value in body.items():
+            field = {"compiler": "compiler", "imageName": "image_name", "rootDocId": "root_doc_id"}[key]
+            if settings[field] != value:
+                raise SkillError(f"Project setting {field} has not been confirmed; inspect it before retrying.")
+        print_json(settings)
+
+
+def command_entity(args: argparse.Namespace) -> None:
+    session = resolve_credentials(args, need_session=True).session or ""
+    with EditorSession(args.project_id, session) as editor:
+        if args.cmd == "list-entities":
+            print_json({"project_id": args.project_id, "entities": project_entities(editor.project)})
+            return
+        if args.cmd == "create-folder":
+            path = PurePosixPath(project_path(args.file_path))
+            parent = find_entity(editor.project, str(path.parent), "folder")
+            if any(e["path"].rstrip("/") == str(path) for e in project_entities(editor.project)):
+                raise SkillError(f"Destination already exists: {path}")
+            result = web_json("POST", f"/project/{args.project_id}/folder", session,
+                              {"name": path.name, "parent_folder_id": parent["id"]})
+        else:
+            entity = find_entity(editor.project, args.file_path)
+            if not entity["path"]:
+                raise SkillError("Cannot modify the root folder")
+            endpoint = f"/project/{args.project_id}/{entity['type']}/{entity['id']}"
+            if args.cmd == "delete-folder":
+                if entity["type"] != "folder" or not args.recursive:
+                    raise SkillError("delete-folder requires a folder and --recursive")
+                result = web_json("DELETE", endpoint, session)
+            elif args.cmd == "rename-file":
+                name = project_path(args.name)
+                if "/" in name:
+                    raise SkillError("Use move-file to change the parent folder")
+                destination = str(PurePosixPath(entity["path"].rstrip("/")).parent / name)
+                if any(e["path"].rstrip("/") == destination for e in project_entities(editor.project)):
+                    raise SkillError(f"Destination already exists: {destination}")
+                result = web_json("POST", endpoint + "/rename", session, {"name": name})
+            else:
+                folder = find_entity(editor.project, args.folder, "folder")
+                source = entity["path"].rstrip("/")
+                if entity["type"] == "folder" and folder["path"].startswith(source + "/"):
+                    raise SkillError("Cannot move a folder into itself")
+                destination = folder["path"] + PurePosixPath(source).name
+                if any(e["path"].rstrip("/") == destination for e in project_entities(editor.project)):
+                    raise SkillError(f"Destination already exists: {destination}")
+                result = web_json("POST", endpoint + "/move", session, {"folder_id": folder["id"]})
+        print_json({"project_id": args.project_id, "action": args.cmd, "completed": True, "result": result})
+
+
+def command_import_project(args: argparse.Namespace) -> None:
+    source = Path(args.source_path).expanduser()
+    payload = source.read_bytes()
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            for entry in archive.infolist():
+                project_path(entry.filename.rstrip("/"))
+    except zipfile.BadZipFile as exc:
+        raise SkillError("Source is not a valid ZIP archive") from exc
+    name = args.name.strip() if args.name else source.stem
+    if not name or any(char in name for char in "/\\\r\n\0"):
+        raise SkillError("Invalid project name")
+    session = resolve_credentials(args, need_session=True).session or ""
+    boundary = "overleaf-" + os.urandom(18).hex()
+    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="name"\r\n\r\n{name}.zip\r\n'
+            f'--{boundary}\r\nContent-Disposition: form-data; name="qqfile"; filename="project.zip"\r\n'
+            'Content-Type: application/zip\r\n\r\n').encode() + payload + f'\r\n--{boundary}--\r\n'.encode()
+    raw = make_request("POST", f"{OVERLEAF_BASE_URL}/project/new/upload", session=session,
+                       headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                                "x-csrf-token": dashboard_csrf_token(session)}, data=body, timeout=300)
+    try:
+        data = json.loads(raw)
+        project_id = object_id(data["project_id"])
+        if data.get("success") is not True:
+            raise ValueError("Upload was not successful")
+    except (ValueError, KeyError, TypeError, argparse.ArgumentTypeError) as exc:
+        raise SkillError("Project import was not confirmed; check projects before retrying.") from exc
+    print_json({"id": project_id, "name": name, "url": f"{OVERLEAF_BASE_URL}/project/{project_id}"})
+
+
+def command_collaborators(args: argparse.Namespace) -> None:
+    session = resolve_credentials(args, need_session=True).session or ""
+    base = f"/project/{args.project_id}"
+    action = args.action
+    if action in ("list", "invites"):
+        result = web_json("GET", base + ("/members" if action == "list" else "/invites"), session)
+    elif action == "invite":
+        if not args.email or not args.privileges:
+            raise SkillError("invite requires --email and --privileges")
+        result = web_json("POST", base + "/invite", session, {"email": args.email, "privileges": args.privileges})
+        if not isinstance(result, dict) or not result.get("invite"):
+            raise SkillError("Invitation was not created; check membership and collaborator limits.")
+    elif action in ("set", "remove"):
+        if not args.user_id or (action == "set" and not args.privileges):
+            raise SkillError("set/remove requires --user-id; set also requires --privileges")
+        result = web_json("PUT" if action == "set" else "DELETE", base + f"/users/{args.user_id}", session,
+                          {"privilegeLevel": args.privileges} if action == "set" else None)
+    else:
+        if not args.invite_id:
+            raise SkillError("revoke/resend requires --invite-id")
+        result = web_json("DELETE" if action == "revoke" else "POST",
+                          base + f"/invite/{args.invite_id}" + ("/resend" if action == "resend" else ""), session)
+    print_json({"project_id": args.project_id, "action": action, "result": result})
+
+
+def command_sharing(args: argparse.Namespace) -> None:
+    session = resolve_credentials(args, need_session=True).session or ""
+    base = f"/project/{args.project_id}"
+    if args.action in ("tokens", "link"):
+        result = web_json("GET", base + ("/tokens" if args.action == "tokens" else "/sharing-link"), session)
+    elif args.action == "set-link":
+        if not args.privileges:
+            raise SkillError("set-link requires --privileges")
+        result = web_json("POST", base + "/sharing-link", session,
+                          {"privileges": False if args.privileges == "none" else args.privileges})
+    else:
+        result = web_json("POST", base + "/settings/admin", session,
+                          {"publicAccessLevel": "tokenBased" if args.action == "enable" else "private"})
+    print_json({"project_id": args.project_id, "action": args.action, "result": result})
+
+
+def utf16_slice(text: str, start: int, length: int) -> str:
+    return text.encode("utf-16-le")[start * 2:(start + length) * 2].decode("utf-16-le")
+
+
+def utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def document_changes(document: dict[str, Any]) -> list[dict[str, Any]]:
+    if not document["history"]:
+        return document["ranges"].get("changes", [])
+    changes = []
+    for item in document["ranges"].get("trackedChanges", []):
+        span, tracking = item["range"], item["tracking"]
+        text = utf16_slice(document["content"], span["pos"], span["length"])
+        identity = json.dumps([item, text], sort_keys=True).encode()
+        changes.append({"id": hashlib.sha256(identity).hexdigest()[:24], "range": span,
+                        "metadata": tracking, "op": {"p": span["pos"], "i" if tracking["type"] == "insert" else "d": text}})
+    return changes
+
+
+def command_review(args: argparse.Namespace) -> None:
+    session = resolve_credentials(args, need_session=True).session or ""
+    with EditorSession(args.project_id, session) as editor:
+        if args.action == "tracking":
+            current = editor.project.get("trackChangesState")
+            current = current if isinstance(current, dict) else {}
+            if args.enabled is None:
+                print_json({"project_id": args.project_id, "tracking": current})
+                return
+            if not args.user_id and not args.guests:
+                raise SkillError("Changing tracking requires --user-id or --guests")
+            body = ({"on_for_guests": args.enabled == "true"} if args.guests else
+                    {"on_for": {**{key: value for key, value in current.items() if key != "__guests__"},
+                                args.user_id: args.enabled == "true"}})
+            web_json("POST", f"/project/{args.project_id}/track_changes", session, body)
+            print_json({"project_id": args.project_id, "tracking_updated": True})
+            return
+        if not args.doc_id:
+            raise SkillError("Review list/accept/reject requires --doc-id from list-entities")
+        document = editor.document(args.doc_id)
+        changes = document_changes(document)
+        if args.action == "list":
+            print_json({"project_id": args.project_id, "doc_id": args.doc_id, "version": document["version"],
+                        "changes": changes, "comments": document["ranges"].get("comments", [])})
+            return
+        if args.expected_version is None or args.expected_version != document["version"]:
+            raise SkillError("Provide the current --expected-version from review list before accepting or rejecting changes")
+        if not args.change_id:
+            raise SkillError("Choose one or more --change-id values from review list")
+        selected = [change for change in changes if change["id"] in args.change_id]
+        if len(selected) != len(set(args.change_id)):
+            raise SkillError("Some selected changes no longer exist; read the document review again")
+        if document["history"]:
+            operations: list[Any] = []
+            position = 0
+            for change in sorted(selected, key=lambda c: c["range"]["pos"]):
+                start, length = change["range"]["pos"], change["range"]["length"]
+                if start < position:
+                    raise SkillError("Overlapping tracked changes cannot be processed together")
+                if start > position:
+                    operations.append(start - position)
+                remove = (args.action == "accept") == ("d" in change["op"])
+                operations.append(-length if remove else {"r": length, "tracking": {"type": "none"}})
+                position = start + length
+            remaining = utf16_length(document["content"]) - position
+            if remaining:
+                operations.append(remaining)
+            editor.apply(args.doc_id, document["version"], [{"textOperation": operations}])
+        elif args.action == "accept":
+            web_json("POST", f"/project/{args.project_id}/doc/{args.doc_id}/changes/accept", session,
+                     {"change_ids": args.change_id})
+        else:
+            operations = []
+            content = document["content"]
+            for change in sorted(selected, key=lambda c: c["op"]["p"], reverse=True):
+                op = change["op"]
+                if "i" in op:
+                    if utf16_slice(content, op["p"], utf16_length(op["i"])) != op["i"]:
+                        raise SkillError("Tracked insertion does not match current text")
+                    operations.append({"p": op["p"], "d": op["i"], "u": True})
+                elif "d" in op:
+                    operations.append({"p": op["p"], "i": op["d"], "u": True})
+                else:
+                    raise SkillError("Unrecognized tracked change")
+            editor.apply(args.doc_id, document["version"], operations)
+        remaining_ids = {change["id"] for change in document_changes(editor.document(args.doc_id))}
+        if remaining_ids.intersection(args.change_id):
+            raise SkillError("Some selected changes remain; inspect the review before retrying")
+        print_json({"project_id": args.project_id, "doc_id": args.doc_id, "action": args.action,
+                    "processed": list(dict.fromkeys(args.change_id))})
+
+
+def command_comments(args: argparse.Namespace) -> None:
+    session = resolve_credentials(args, need_session=True).session or ""
+    base = f"/project/{args.project_id}"
+    action = args.action
+    if action == "list":
+        print_json(web_json("GET", base + "/threads", session))
+        return
+    content = Path(args.content_file).read_text(encoding="utf-8") if args.content_file else args.content
+    if action in ("add", "reply", "edit") and (not content or not content.strip()):
+        raise SkillError("A comment requires --content or --content-file")
+    if action != "add" and not args.thread_id:
+        raise SkillError("This action requires --thread-id")
+    if action in ("reply", "edit", "delete-message"):
+        endpoint = base + f"/thread/{args.thread_id}/messages"
+        if action != "reply":
+            if not args.message_id:
+                raise SkillError("edit/delete-message requires --message-id")
+            endpoint += f"/{args.message_id}" + ("/edit" if action == "edit" else "")
+        result = web_json("DELETE" if action == "delete-message" else "POST", endpoint, session,
+                          None if action == "delete-message" else {"content": content})
+        print_json({"thread_id": args.thread_id, "action": action, "result": result})
+        return
+    if not args.doc_id:
+        raise SkillError("This action requires --doc-id from list-entities")
+    with EditorSession(args.project_id, session) as editor:
+        document = editor.document(args.doc_id)
+        thread_id = args.thread_id
+        if action == "add":
+            if not args.quote:
+                raise SkillError("add requires --quote containing the text to annotate")
+            if args.start is None:
+                if document["content"].count(args.quote) != 1:
+                    raise SkillError("Quote must match exactly once, or provide --start in UTF-16 units")
+                start = utf16_length(document["content"].split(args.quote, 1)[0])
+            else:
+                start = args.start
+            length = utf16_length(args.quote)
+            if start < 0 or utf16_slice(document["content"], start, length) != args.quote:
+                raise SkillError("Quote does not match the document at --start")
+            thread_id = os.urandom(12).hex()
+            web_json("POST", base + f"/thread/{thread_id}/messages", session, {"content": content})
+            operation = ({"commentId": thread_id, "ranges": [{"pos": start, "length": length}]} if document["history"] else
+                         {"c": args.quote, "p": start, "t": thread_id})
+            try:
+                editor.apply(args.doc_id, document["version"], [operation])
+            except (SkillError, OSError) as exc:
+                raise SkillError(f"Comment thread {thread_id} was created but its text anchor was not confirmed: {exc}") from exc
+        else:
+            comments = document["ranges"].get("comments", [])
+            if not any(comment.get("id") == thread_id for comment in comments):
+                raise SkillError("Thread is not anchored to the specified document")
+            if document["history"]:
+                operation = ({"deleteComment": thread_id} if action == "delete-thread" else
+                             {"commentId": thread_id, "resolved": action == "resolve"})
+                editor.apply(args.doc_id, document["version"], [operation])
+            else:
+                suffix = "" if action == "delete-thread" else f"/{action}"
+                web_json("DELETE" if action == "delete-thread" else "POST",
+                         base + f"/doc/{args.doc_id}/thread/{thread_id}" + suffix, session)
+        print_json({"project_id": args.project_id, "doc_id": args.doc_id, "thread_id": thread_id,
+                    "action": action, "completed": True})
+
+
 def command_status(args: argparse.Namespace) -> None:
     creds = resolve_credentials(args, need_session=True)
     files, zip_data = zip_snapshot(args.project_id, creds.session or "")
     tex_files = [f for f in files if f.lower().endswith(".tex")]
-    main_file = choose_main_file(files)
+    with EditorSession(args.project_id, creds.session or "") as editor:
+        settings = project_settings(editor.project)
+    main_file = settings["main_file"]
     sections: list[dict[str, Any]] = []
     if main_file:
         content = read_from_zip(zip_data, main_file)
@@ -733,6 +1242,8 @@ def command_status(args: argparse.Namespace) -> None:
             "total_files": len(files),
             "tex_files": len(tex_files),
             "main_file": main_file,
+            "compiler": settings["compiler"],
+            "image_name": settings["image_name"],
             "sections": [
                 {"type": s["type"], "level": s["level"], "title": s["title"], "index": s["index"]}
                 for s in sections
@@ -810,6 +1321,9 @@ def build_output_url(url: str, clsi_server_id: str | None) -> str:
 def command_compile(args: argparse.Namespace) -> None:
     creds = resolve_credentials(args, need_session=True)
     data = compile_project(args.project_id, creds.session or "")
+    if args.result_file:
+        write_json(Path(args.result_file), {"project_id": args.project_id, "base_url": OVERLEAF_BASE_URL,
+                   "session_hash": hashlib.sha256((creds.session or "").encode()).hexdigest(), "result": data})
     print_json(
         {
             "status": data.get("status"),
@@ -819,42 +1333,46 @@ def command_compile(args: argparse.Namespace) -> None:
     )
 
 
+def download_compile_output(args: argparse.Namespace, filename: str) -> tuple[bytes, Any]:
+    session = resolve_credentials(args, need_session=True).session or ""
+    if args.compile_result:
+        saved = read_json(Path(args.compile_result), None)
+        if not isinstance(saved, dict) or saved.get("project_id") != args.project_id or saved.get("base_url") != OVERLEAF_BASE_URL:
+            raise SkillError("Compile result belongs to a different project or server")
+        if saved.get("session_hash") != hashlib.sha256(session.encode()).hexdigest():
+            raise SkillError("Compile result belongs to a different session")
+        data = saved.get("result")
+        if not isinstance(data, dict):
+            raise SkillError("Invalid compile result")
+    else:
+        data = compile_project(args.project_id, session)
+    item = next((item for item in data.get("outputFiles", []) if item.get("path") == filename and item.get("url")), None)
+    if not item:
+        raise SkillError(f"No {filename} in compile result; status={data.get('status')}")
+    url = build_output_url(item["url"], data.get("clsiServerId"))
+    parsed = urllib.parse.urlsplit(url)
+    base = urllib.parse.urlsplit(OVERLEAF_BASE_URL)
+    if (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc):
+        raise SkillError("Compile output URL is outside the configured Overleaf server")
+    return make_request("GET", url, session=session, timeout=180), data.get("status")
+
+
 def command_download_pdf(args: argparse.Namespace) -> None:
-    creds = resolve_credentials(args, need_session=True)
-    data = compile_project(args.project_id, creds.session or "")
-    pdf_file = None
-    for item in data.get("outputFiles", []):
-        if item.get("path") == "output.pdf" and item.get("url"):
-            pdf_file = item
-            break
-    if not pdf_file:
-        raise SkillError(f"No output.pdf in compile result; status={data.get('status')}")
-    url = build_output_url(pdf_file["url"], data.get("clsiServerId"))
-    pdf = make_request("GET", url, session=creds.session, timeout=180)
+    pdf, status = download_compile_output(args, "output.pdf")
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(pdf)
-    print_json({"status": data.get("status"), "output": str(output), "bytes": len(pdf)})
+    print_json({"status": status, "output": str(output), "bytes": len(pdf)})
 
 
 def command_download_log(args: argparse.Namespace) -> None:
-    creds = resolve_credentials(args, need_session=True)
-    data = compile_project(args.project_id, creds.session or "")
-    log_file = None
-    for item in data.get("outputFiles", []):
-        if item.get("path") == "output.log" and item.get("url"):
-            log_file = item
-            break
-    if not log_file:
-        raise SkillError(f"No output.log in compile result; status={data.get('status')}")
-    url = build_output_url(log_file["url"], data.get("clsiServerId"))
-    log_data = make_request("GET", url, session=creds.session, timeout=180)
+    log_data, status = download_compile_output(args, "output.log")
     text = log_data.decode("utf-8", errors="replace")
     if args.output:
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
-        print_json({"status": data.get("status"), "output": str(output), "chars": len(text)})
+        print_json({"status": status, "output": str(output), "chars": len(text)})
     else:
         sys.stdout.write(text)
 
@@ -890,6 +1408,79 @@ def command_create_file(args: argparse.Namespace) -> None:
     target.write_text(content, encoding="utf-8")
     result = git_commit_push(repo, args.file_path, args.commit_message or f"Add {args.file_path}", creds.git_token or "", push_timeout=args.push_timeout)
     print_json({"project_id": args.project_id, "file_path": args.file_path, "repo": str(repo), "created": True, **result})
+
+
+def command_batch_files(args: argparse.Namespace) -> None:
+    manifest_path = Path(args.manifest).expanduser().resolve()
+    operations = read_json(manifest_path, None)
+    if not isinstance(operations, list) or not operations or not all(isinstance(op, dict) for op in operations):
+        raise SkillError("Manifest must contain a non-empty JSON array of file operations")
+    creds = resolve_credentials(args, need_git=True)
+    repo = ensure_repo(args.project_id, creds.git_token or "", clone_timeout=args.clone_timeout, pull_timeout=args.pull_timeout)
+    if git_dirty(repo):
+        raise SkillError("Batch operations require a clean project cache; preserve or commit existing work first.")
+    changes: dict[str, bytes | None] = {}
+    original: dict[str, bytes | None] = {}
+
+    def read(path: str) -> bytes | None:
+        target = safe_repo_path(repo, path)
+        if path not in original:
+            if target.exists() and not target.is_file():
+                raise SkillError(f"Batch operations require file paths: {path}")
+            original[path] = target.read_bytes() if target.exists() else None
+        return changes.get(path, original[path])
+
+    for op in operations:
+        action = op.get("action")
+        path = project_path(op.get("path", ""))
+        content = read(path)
+        if action in ("upload", "write"):
+            if content is not None and op.get("overwrite") is not True:
+                raise SkillError(f"Existing file requires overwrite=true: {path}")
+            if action == "upload":
+                if not isinstance(op.get("source"), str) or not op["source"]:
+                    raise SkillError(f"upload requires a local source path: {path}")
+                source = Path(op.get("source", "")).expanduser()
+                source = source if source.is_absolute() else manifest_path.parent / source
+                changes[path] = source.read_bytes()
+            else:
+                if not isinstance(op.get("content"), str):
+                    raise SkillError(f"write requires string content: {path}")
+                changes[path] = op["content"].encode("utf-8")
+        elif action in ("delete", "move"):
+            if content is None:
+                raise SkillError(f"Source file not found: {path}")
+            if action == "move":
+                destination = project_path(op.get("destination", ""))
+                if read(destination) is not None:
+                    raise SkillError(f"Destination already exists: {destination}")
+                changes[destination] = content
+            changes[path] = None
+        else:
+            raise SkillError(f"Unknown batch action: {action}")
+    changes = {path: content for path, content in changes.items() if content != original[path]}
+    if not changes:
+        print_json({"project_id": args.project_id, "committed": False, "pushed": False})
+        return
+    for path, content in changes.items():
+        target = safe_repo_path(repo, path)
+        if content is not None:
+            for parent in target.parents:
+                if parent == repo:
+                    break
+                if parent.exists() and not parent.is_dir():
+                    raise SkillError(f"Parent is not a directory: {path}")
+            if any(PurePosixPath(path) in PurePosixPath(other).parents for other in changes):
+                raise SkillError(f"Conflicting batch paths: {path}")
+    for path, content in changes.items():
+        target = safe_repo_path(repo, path)
+        if content is None:
+            target.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+    result = git_commit_push_paths(repo, list(changes), args.commit_message, creds.git_token or "", push_timeout=args.push_timeout)
+    print_json({"project_id": args.project_id, "files": list(changes), **result})
 
 
 def command_write_file(args: argparse.Namespace) -> None:
@@ -1135,6 +1726,84 @@ def build_parser() -> argparse.ArgumentParser:
 
     projects = sub.add_parser("projects", help="List projects via Overleaf Web")
     add_common_auth(projects)
+    for name in ("archived-projects", "trashed-projects"):
+        listing = sub.add_parser(name, help="List " + name.replace("-", " "))
+        add_common_auth(listing)
+        listing.set_defaults(handler=command_projects)
+    purge = sub.add_parser("purge-trash", help="Permanently delete projects currently in the trash")
+    add_common_auth(purge)
+    purge.add_argument("--confirm-count", type=int, required=True, help="Exact project count from trashed-projects")
+    purge.set_defaults(handler=command_purge_trash)
+
+    def project_command(name: str, help_text: str, handler: Any) -> argparse.ArgumentParser:
+        command = sub.add_parser(name, help=help_text)
+        add_common_auth(command)
+        command.add_argument("--project-id", type=object_id, required=True)
+        command.set_defaults(handler=handler)
+        return command
+
+    settings = project_command("project-settings", "Read or update compiler, TeX Live image and main document", command_project_settings)
+    settings.add_argument("--compiler", choices=("pdflatex", "latex", "xelatex", "lualatex"))
+    settings.add_argument("--image-name", help="Exact image name from available_images")
+    settings.add_argument("--main-file", help="Project-relative path to a text document")
+    for name in ("rename-project", "archive-project", "unarchive-project", "trash-project", "restore-project"):
+        command = project_command(name, name.replace("-", " ").capitalize(), command_manage_project)
+        if name == "rename-project":
+            command.add_argument("--name", required=True)
+
+    for name in ("list-entities", "rename-file", "move-file", "create-folder", "delete-folder"):
+        command = project_command(name, name.replace("-", " ").capitalize(), command_entity)
+        if name != "list-entities":
+            command.add_argument("--file-path", required=True, help="Project-relative file or folder path")
+        if name == "rename-file":
+            command.add_argument("--name", required=True, help="New basename for the file or folder")
+        elif name == "move-file":
+            command.add_argument("--folder", required=True, help="Existing destination folder; . is the root")
+        elif name == "delete-folder":
+            command.add_argument("--recursive", action="store_true", help="Delete the folder and its contents")
+
+    import_project = sub.add_parser("import-project", help="Create a project from a local ZIP archive")
+    add_common_auth(import_project)
+    import_project.add_argument("--source-path", required=True)
+    import_project.add_argument("--name")
+    import_project.set_defaults(handler=command_import_project)
+
+    batch = project_command("batch-files", "Apply a JSON array of file operations in one Git commit", command_batch_files)
+    add_git_timeouts(batch)
+    batch.add_argument("--manifest", required=True)
+    batch.add_argument("--commit-message", required=True)
+
+    collaborators = project_command("collaborators", "List, invite or manage project collaborators", command_collaborators)
+    collaborators.add_argument("action", choices=("list", "invites", "invite", "set", "remove", "revoke", "resend"))
+    collaborators.add_argument("--email")
+    collaborators.add_argument("--user-id", type=object_id)
+    collaborators.add_argument("--invite-id", type=object_id)
+    collaborators.add_argument("--privileges", choices=("readOnly", "readAndWrite", "review"))
+
+    sharing = project_command("sharing", "Read or manage project sharing links", command_sharing)
+    sharing.add_argument("action", choices=("tokens", "enable", "disable", "link", "set-link"))
+    sharing.add_argument("--privileges", choices=("readOnly", "readAndWrite", "review", "none"))
+
+    comments = project_command("comments", "Read, annotate, reply to or manage comment threads", command_comments)
+    comments.add_argument("action", choices=("list", "add", "reply", "edit", "delete-message", "resolve", "reopen", "delete-thread"))
+    comments.add_argument("--doc-id", type=object_id)
+    comments.add_argument("--thread-id", type=object_id)
+    comments.add_argument("--message-id", type=object_id)
+    comments.add_argument("--quote", help="Exact text to annotate")
+    comments.add_argument("--start", type=int, help="UTF-16 offset into the document snapshot")
+    content = comments.add_mutually_exclusive_group()
+    content.add_argument("--content")
+    content.add_argument("--content-file")
+
+    review = project_command("review", "Read, accept or reject tracked changes; configure tracking", command_review)
+    review.add_argument("action", choices=("list", "accept", "reject", "tracking"))
+    review.add_argument("--doc-id", type=object_id)
+    review.add_argument("--change-id", action="append", help="Change ID from review list; repeat for multiple changes")
+    review.add_argument("--expected-version", type=int, help="Document version from review list")
+    review.add_argument("--enabled", choices=("true", "false"))
+    tracking_target = review.add_mutually_exclusive_group()
+    tracking_target.add_argument("--user-id", type=object_id)
+    tracking_target.add_argument("--guests", action="store_true")
 
     create_project = sub.add_parser("create-project", help="Create a new blank Overleaf project via Web")
     add_common_auth(create_project)
@@ -1177,16 +1846,19 @@ def build_parser() -> argparse.ArgumentParser:
     compile_p = sub.add_parser("compile", help="Compile project via Overleaf Web")
     add_common_auth(compile_p)
     compile_p.add_argument("--project-id", required=True)
+    compile_p.add_argument("--result-file", help="Save build metadata for subsequent downloads without recompiling")
 
     pdf = sub.add_parser("download-pdf", help="Compile and download output.pdf")
     add_common_auth(pdf)
     pdf.add_argument("--project-id", required=True)
     pdf.add_argument("--output", required=True)
+    pdf.add_argument("--compile-result", help="Reuse a result file from compile --result-file")
 
     log = sub.add_parser("download-log", help="Compile and download or print output.log")
     add_common_auth(log)
     log.add_argument("--project-id", required=True)
     log.add_argument("--output")
+    log.add_argument("--compile-result", help="Reuse a result file from compile --result-file")
 
     source_zip = sub.add_parser("download-source-zip", help="Download project source ZIP via Web")
     add_common_auth(source_zip)
@@ -1320,7 +1992,9 @@ def main(argv: list[str] | None = None) -> int:
         project_id = getattr(args, "project_id", None)
         if project_id is not None and not re.fullmatch(r"[0-9a-fA-F]{24}", project_id):
             raise SkillError("Project ID must be 24 hexadecimal characters")
-        if args.cmd == "account":
+        if hasattr(args, "handler"):
+            args.handler(args)
+        elif args.cmd == "account":
             command_account(args)
         elif args.cmd == "create-project":
             command_create_project(args)
