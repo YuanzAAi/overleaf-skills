@@ -45,7 +45,7 @@ List my projects and read main.tex from the project I select.
 Update the introduction, compile the project and download its PDF.
 ```
 
-Cloud authoring delivers the compiled PDF locally by default. Temporary source files, build metadata and diagnostic logs are cleaned after successful delivery. Reusable Git caches are retained; explicitly requested source/log exports or local workspaces are kept. The agent diagnoses build failures and continues fixing them, retaining only the work needed while recovery is in progress.
+For cloud authoring, the default local deliverable is the successfully compiled PDF. The agent diagnoses and fixes build failures, then removes its temporary source files, build metadata, logs and the completed task's fully pushed Git working copy. Explicit requests for source, logs or a persistent local workspace take precedence; user-supplied files and unresolved work are preserved.
 
 Use only credentials and projects you are authorized to access. The session cookie enables project management, collaboration, source reads/downloads and compilation; file content edits and Git history use Overleaf Git integration, which must be available to your account. Replace the saved pair to switch accounts.
 
