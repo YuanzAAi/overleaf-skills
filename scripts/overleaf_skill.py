@@ -1384,10 +1384,11 @@ def download_compile_output(args: argparse.Namespace, filename: str) -> tuple[by
 
 def command_download_pdf(args: argparse.Namespace) -> None:
     pdf, status = download_compile_output(args, "output.pdf")
-    if status != "success":
-        raise SkillError(f"Compile did not succeed; status={status}. Inspect the compile log before delivering a PDF.")
-    if not pdf.startswith(b"%PDF-"):
-        raise SkillError("Compile output is not a valid PDF")
+    if args.require_success:
+        if status != "success":
+            raise SkillError(f"Compile did not succeed; status={status}. Inspect the compile log before delivering a PDF.")
+        if not pdf.startswith(b"%PDF-"):
+            raise SkillError("Compile output is not a valid PDF")
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(pdf)
@@ -1881,6 +1882,7 @@ def build_parser() -> argparse.ArgumentParser:
     pdf.add_argument("--project-id", required=True)
     pdf.add_argument("--output", required=True)
     pdf.add_argument("--compile-result", help="Reuse a result file from compile --result-file")
+    pdf.add_argument("--require-success", action="store_true", help="Require a successful build and PDF header before writing")
 
     log = sub.add_parser("download-log", help="Compile and download or print output.log")
     add_common_auth(log)

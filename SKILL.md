@@ -22,7 +22,7 @@ Reuse results within the task instead of rediscovering the project at every step
 
 - Use a known or newly returned project ID directly; list projects only when the target is unknown. Inspect the real main document and compiler when needed, then read each relevant source once per revision. `status`, `list-files`, `read-file` and `sections` each fetch a ZIP snapshot; avoid chaining them when one result already answers the question.
 - Use `batch-files` for several prepared edits: it synchronizes once and commits/pushes the batch once. A single-file edit command also synchronizes its cache, so an extra `sync-project` immediately beforehand is unnecessary. Serialize writes to the same project; independent projects may proceed separately.
-- After the push succeeds, compile the changed revision once with `--result-file`. Reuse that result with `--compile-result` for the PDF and any needed log. Downloading without it compiles again. Recompile after further edits or when the saved artifacts expire; never deliver an old build as the updated project.
+- After the push succeeds, compile the changed revision once with `--result-file`. Reuse that result with `--compile-result` for the PDF and any needed log. Use `download-pdf --require-success` for the final deliverable so a failed build or non-PDF response cannot overwrite it; omit that flag only for an intentional diagnostic download. Downloading without it compiles again. Recompile after further edits or when the saved artifacts expire; never deliver an old build as the updated project.
 - When a build fails, read its log from the same compile result, fix the cause, and compile the corrected revision. Successful builds do not need a routine log or full source export. Verify the PDF, then perform the local cleanup below once at the end, not between edits or repair attempts.
 
 ## Credentials
@@ -88,7 +88,7 @@ python <script> list-files --project-id PROJECT_ID --extension .tex
 python <script> read-file --project-id PROJECT_ID --file-path main.tex
 python <script> sections --project-id PROJECT_ID --file-path main.tex --title "Introduction"
 python <script> compile --project-id PROJECT_ID --result-file "<task-temp>/build.json"
-python <script> download-pdf --project-id PROJECT_ID --compile-result "<task-temp>/build.json" --output report.pdf
+python <script> download-pdf --project-id PROJECT_ID --compile-result "<task-temp>/build.json" --require-success --output report.pdf
 ```
 
 Respect the project's bibliography engine and template; inspect compilation logs before changing citation conventions. The saved compile result lets PDF and log downloads use the same build without recompiling. It is scoped to the project, server and session; expired artifacts require an explicit new compilation. Without `--compile-result`, each download compiles first.
