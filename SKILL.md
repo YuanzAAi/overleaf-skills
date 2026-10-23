@@ -7,6 +7,15 @@ description: Operate Overleaf projects from Codex or Claude Code with session-co
 
 Use `scripts/overleaf_skill.py` relative to this SKILL.md. Invoke it with Python 3.10+ (`python` on Windows, usually `python3` on macOS). Resolve the installed path from the loaded skill, not the current working directory. The examples below use `<script>` for that absolute path.
 
+## PDF Delivery
+
+For cloud project creation or editing, the default local deliverable is the finished PDF; keep the project source on Overleaf. Explicit requests for source, logs, offline editing or a persistent local workspace take precedence. Read-only inspection and project management do not require a PDF build.
+
+- Put task-created TeX snippets, edit manifests, source snapshots, build-result JSON and diagnostic logs in a task-specific directory under the system temporary directory, not in the user's output folder or current working directory. Reuse the built-in Git cache for edits instead of making another source checkout. Prefer `read-file` and printed logs when no local copy is needed.
+- Compile remotely, check the build status, and download the PDF to the requested destination outside the temporary workspace and Git cache. Check that the downloaded file is a PDF and inspect it before delivery. A PDF produced by an unsuccessful build is a diagnostic artifact, not the finished deliverable.
+- On failure, inspect the relevant errors, fix the problem within the task's authorization, and continue to a successful build. Keep working files while recovery is in progress; do not end the task by handing over logs instead of resolving an actionable error. If progress needs user input or an external service to recover, retain only the material needed to resume and explain that dependency.
+- After the edits are confirmed on Overleaf and the final PDF is verified, remove the task-created scratch files. Leave only the PDF and any other explicitly requested deliverables in the output folder. Keep the clean built-in Git cache when it is reusable; audit it with the cleanup command and remove only stale, non-reusable project caches. Never delete user-supplied sources, pre-existing files, credentials or work still needed by another operation.
+
 ## Credentials
 
 Keep one credential pair per assistant. `account set` replaces the saved pair and is the account switch; never print raw credentials in responses.
@@ -69,27 +78,30 @@ python <script> status --project-id PROJECT_ID
 python <script> list-files --project-id PROJECT_ID --extension .tex
 python <script> read-file --project-id PROJECT_ID --file-path main.tex
 python <script> sections --project-id PROJECT_ID --file-path main.tex --title "Introduction"
-python <script> download-source-zip --project-id PROJECT_ID --output project.zip
-python <script> download-source --project-id PROJECT_ID --output-dir project-source
-python <script> compile --project-id PROJECT_ID
-python <script> download-pdf --project-id PROJECT_ID --output report.pdf
-python <script> download-log --project-id PROJECT_ID --output compile.log
+python <script> compile --project-id PROJECT_ID --result-file "<task-temp>/build.json"
+python <script> download-pdf --project-id PROJECT_ID --compile-result "<task-temp>/build.json" --output report.pdf
 ```
 
-For requested PDF output without a suitable local TeX toolchain, use remote compilation. Respect the project's bibliography engine and template; inspect compilation logs before changing citation conventions.
+Respect the project's bibliography engine and template; inspect compilation logs before changing citation conventions. The saved compile result lets PDF and log downloads use the same build without recompiling. It is scoped to the project, server and session; expired artifacts require an explicit new compilation. Without `--compile-result`, each download compiles first.
 
-To download PDF and logs from the same build, use `compile --project-id PROJECT_ID --result-file build.json`, then pass `--compile-result build.json` to both download commands. The file is scoped to the project, server and session; expired artifacts require an explicit new compilation. Without this option, each download compiles first.
+Download source only when requested or needed for the task; use the temporary workspace for diagnostic copies. To inspect a log without creating a file, omit `--output`.
+
+```sh
+python <script> download-log --project-id PROJECT_ID --compile-result "<task-temp>/build.json"
+python <script> download-source-zip --project-id PROJECT_ID --output project.zip
+python <script> download-source --project-id PROJECT_ID --output-dir project-source
+```
 
 ## Edit And Review
 
 File content edits and Git history require Git integration. Read the target before editing, review the intended change, and stop on a Git failure rather than making further remote writes. Project management, settings and collaboration use the session cookie instead.
 
 ```sh
-python <script> create-file --project-id PROJECT_ID --file-path chapter/new.tex --content-file new.tex
-python <script> rewrite-file --project-id PROJECT_ID --file-path main.tex --content-file main.tex
+python <script> create-file --project-id PROJECT_ID --file-path chapter/new.tex --content-file "<task-temp>/new.tex"
+python <script> rewrite-file --project-id PROJECT_ID --file-path main.tex --content-file "<task-temp>/main.tex"
 python <script> edit-file --project-id PROJECT_ID --file-path main.tex --old-string "teh" --new-string "the"
-python <script> update-section --project-id PROJECT_ID --file-path main.tex --section-title "Introduction" --content-file body.tex
-python <script> write-section --project-id PROJECT_ID --file-path main.tex --section-title "Introduction" --content-file section.tex --commit-message "Replace introduction"
+python <script> update-section --project-id PROJECT_ID --file-path main.tex --section-title "Introduction" --content-file "<task-temp>/body.tex"
+python <script> write-section --project-id PROJECT_ID --file-path main.tex --section-title "Introduction" --content-file "<task-temp>/section.tex" --commit-message "Replace introduction"
 python <script> upload-file --project-id PROJECT_ID --file-path figures/chart.png --source-path chart.png
 python <script> delete-file --project-id PROJECT_ID --file-path scratch.tex --commit-message "Remove scratch file"
 python <script> sync-project --project-id PROJECT_ID
@@ -99,7 +111,7 @@ python <script> get-diff --project-id PROJECT_ID --from-ref HEAD~1 --to-ref HEAD
 
 `create-file` requires a new path; `rewrite-file` requires an existing one. `write-file` can create or replace. `upload-file` preserves bytes. `update-section` retains the existing heading; `write-section` replaces it with supplied full section content. Exact text edits require exactly one match.
 
-For several file edits, use `batch-files --project-id PROJECT_ID --manifest edits.json --commit-message "Update paper"`. The manifest is a JSON array, processed in order and pushed as one Git commit:
+For several file edits, use `batch-files --project-id PROJECT_ID --manifest "<task-temp>/edits.json" --commit-message "Update paper"`. The manifest is a JSON array, processed in order and pushed as one Git commit:
 
 ```json
 [
@@ -133,11 +145,11 @@ Get document IDs from `list-entities`, thread/message IDs from `comments list`, 
 
 ## Cache
 
-Reuse project caches across commands. At the end of a project task, inspect and clean only the finished project's cache:
+Reuse project caches throughout the task. Do not delete a clean cache merely because the PDF is finished: it is the reusable Git workspace for later edits. Audit only when the cache is stale or the user asks for cleanup. First use the dry run to identify candidate directories; check each for local changes and commits not yet pushed to its upstream. A clean working tree alone does not prove a failed push was recovered. Preserve any candidate with pending work, an unknown upstream or another operation still using it.
 
 ```sh
 python <script> cache-clean --project-id PROJECT_ID --dry-run
 python <script> cache-clean --project-id PROJECT_ID
 ```
 
-Dirty repositories are preserved unless `--force` is explicitly authorized. Cache cleanup does not clear credentials. Run `--help` or a command's `--help` for options and timeouts. If session reads fail, verify with `projects`; if Git access fails, report the error before changing content.
+The cleanup command preserves dirty repositories by default; do not use `--force` to discard unresolved work. Keep a cache when the user requested a persistent local workspace or it is still needed for recovery. Cache cleanup does not clear credentials. Run `--help` or a command's `--help` for options and timeouts. If session reads fail, verify with `projects`; if Git access fails, report the error before changing content.

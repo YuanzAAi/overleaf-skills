@@ -45,6 +45,8 @@ List my projects and read main.tex from the project I select.
 Update the introduction, compile the project and download its PDF.
 ```
 
+Cloud authoring delivers the compiled PDF locally by default. Temporary source files, build metadata, logs and the finished task's Git cache are cleaned after successful delivery; explicitly requested source/log exports or local workspaces are kept. The agent diagnoses build failures and continues fixing them, retaining only the work needed while recovery is in progress.
+
 Use only credentials and projects you are authorized to access. The session cookie enables project management, collaboration, source reads/downloads and compilation; file content edits and Git history use Overleaf Git integration, which must be available to your account. Replace the saved pair to switch accounts.
 
 | Workflow | Included |
