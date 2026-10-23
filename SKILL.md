@@ -9,12 +9,21 @@ Use `scripts/overleaf_skill.py` relative to this SKILL.md. Invoke it with Python
 
 ## PDF Delivery
 
-For cloud project creation or editing, the default local deliverable is the finished PDF; keep the project source on Overleaf. Explicit requests for source, logs, offline editing or a persistent local workspace take precedence. Read-only inspection and project management do not require a PDF build.
+For cloud project creation or editing, deliver the finished PDF locally and keep the Overleaf project, its source and history online. Cleaning local working files never authorizes deleting or trashing the cloud project; those actions require an explicit user request for that project. Report the local PDF path and the cloud project URL together. Explicit requests for source, logs, offline editing or a persistent local workspace take precedence. Read-only inspection and project management do not require a PDF build.
 
 - Put task-created TeX snippets, edit manifests, source snapshots, build-result JSON and diagnostic logs in a task-specific directory under the system temporary directory, not in the user's output folder or current working directory. Reuse the built-in Git cache for edits instead of making another source checkout. Prefer `read-file` and printed logs when no local copy is needed.
 - Compile remotely, check the build status, and download the PDF to the requested destination outside the temporary workspace and Git cache. Check that the downloaded file is a PDF and inspect it before delivery. A PDF produced by an unsuccessful build is a diagnostic artifact, not the finished deliverable.
 - On failure, inspect the relevant errors, fix the problem within the task's authorization, and continue to a successful build. Keep working files while recovery is in progress; do not end the task by handing over logs instead of resolving an actionable error. If progress needs user input or an external service to recover, retain only the material needed to resume and explain that dependency.
-- After the edits are confirmed on Overleaf and the final PDF is verified, remove the task-created scratch files and finish the project-cache cleanup below. Leave only the PDF and any other explicitly requested deliverables in the output folder. Never delete user-supplied sources, pre-existing files, credentials or work still needed by another operation.
+- After the edits are confirmed on Overleaf and the final PDF is verified, keep the cloud project available, remove the task-created local scratch files and finish the project-cache cleanup below. Leave only the PDF and any other explicitly requested deliverables in the output folder. Never delete user-supplied sources, pre-existing files, credentials or work still needed by another operation.
+
+## Efficient Authoring
+
+Reuse results within the task instead of rediscovering the project at every step:
+
+- Use a known or newly returned project ID directly; list projects only when the target is unknown. Inspect the real main document and compiler when needed, then read each relevant source once per revision. `status`, `list-files`, `read-file` and `sections` each fetch a ZIP snapshot; avoid chaining them when one result already answers the question.
+- Use `batch-files` for several prepared edits: it synchronizes once and commits/pushes the batch once. A single-file edit command also synchronizes its cache, so an extra `sync-project` immediately beforehand is unnecessary. Serialize writes to the same project; independent projects may proceed separately.
+- After the push succeeds, compile the changed revision once with `--result-file`. Reuse that result with `--compile-result` for the PDF and any needed log. Downloading without it compiles again. Recompile after further edits or when the saved artifacts expire; never deliver an old build as the updated project.
+- When a build fails, read its log from the same compile result, fix the cause, and compile the corrected revision. Successful builds do not need a routine log or full source export. Verify the PDF, then perform the local cleanup below once at the end, not between edits or repair attempts.
 
 ## Credentials
 
@@ -145,7 +154,7 @@ Get document IDs from `list-entities`, thread/message IDs from `comments list`, 
 
 ## Cache
 
-Reuse project caches throughout the task. After successful PDF-only delivery, inspect and clean only the finished project's cache. First use the dry run to identify candidate directories; check each for local changes and commits not yet pushed to its upstream. A clean working tree alone does not prove a failed push was recovered. Preserve any candidate with pending work, an unknown upstream or another operation still using it.
+This section operates only on local files, not the Overleaf project or its remote source. Reuse project caches throughout the task. After successful PDF-only delivery, inspect and clean only the finished project's local cache. First use the dry run to identify candidate directories; check each for local changes and commits not yet pushed to its upstream. A clean working tree alone does not prove a failed push was recovered. Preserve any candidate with pending work, an unknown upstream or another operation still using it.
 
 ```sh
 python <script> cache-clean --project-id PROJECT_ID --dry-run
