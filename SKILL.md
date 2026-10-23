@@ -145,7 +145,7 @@ Get document IDs from `list-entities`, thread/message IDs from `comments list`, 
 
 ## Cache
 
-Reuse project caches throughout the task. After successful PDF-only delivery, inspect and clean only the finished project's cache. First use the dry run to identify candidate directories; check each for local changes and commits not yet pushed to its upstream. A clean working tree alone does not prove a failed push was recovered. Preserve any candidate with pending work, an unknown upstream or another operation still using it.
+Reuse project caches throughout the task. Do not delete a clean cache merely because the PDF is finished: it is the reusable Git workspace for later edits and stays under the agent's private cache directory, outside the user's output folder. Audit only when the cache is stale or cleanup is requested. First use the dry run to identify candidate directories; check each for local changes and commits not yet pushed to its upstream. A clean working tree alone does not prove a failed push was recovered. Preserve any candidate with pending work, an unknown upstream or another operation still using it.
 
 ```sh
 python <script> cache-clean --project-id PROJECT_ID --dry-run
