@@ -14,7 +14,7 @@ For cloud project creation or editing, the default local deliverable is the fini
 - Put task-created TeX snippets, edit manifests, source snapshots, build-result JSON and diagnostic logs in a task-specific directory under the system temporary directory, not in the user's output folder or current working directory. Reuse the built-in Git cache for edits instead of making another source checkout. Prefer `read-file` and printed logs when no local copy is needed.
 - Compile remotely, check the build status, and download the PDF to the requested destination outside the temporary workspace and Git cache. Check that the downloaded file is a PDF and inspect it before delivery. A PDF produced by an unsuccessful build is a diagnostic artifact, not the finished deliverable.
 - On failure, inspect the relevant errors, fix the problem within the task's authorization, and continue to a successful build. Keep working files while recovery is in progress; do not end the task by handing over logs instead of resolving an actionable error. If progress needs user input or an external service to recover, retain only the material needed to resume and explain that dependency.
-- After the edits are confirmed on Overleaf and the final PDF is verified, remove the task-created scratch files and finish the project-cache cleanup below. Leave only the PDF and any other explicitly requested deliverables in the output folder. Never delete user-supplied sources, pre-existing files, credentials or work still needed by another operation.
+- After the edits are confirmed on Overleaf and the final PDF is verified, remove the task-created scratch files. Leave only the PDF and any other explicitly requested deliverables in the output folder. Keep the clean built-in Git cache when it is reusable; audit it with the cleanup command and remove only stale, non-reusable project caches. Never delete user-supplied sources, pre-existing files, credentials or work still needed by another operation.
 
 ## Credentials
 
@@ -145,7 +145,7 @@ Get document IDs from `list-entities`, thread/message IDs from `comments list`, 
 
 ## Cache
 
-Reuse project caches throughout the task. After successful PDF-only delivery, inspect and clean only the finished project's cache. First use the dry run to identify candidate directories; check each for local changes and commits not yet pushed to its upstream. A clean working tree alone does not prove a failed push was recovered. Preserve any candidate with pending work, an unknown upstream or another operation still using it.
+Reuse project caches throughout the task. Do not delete a clean cache merely because the PDF is finished: it is the reusable Git workspace for later edits and stays under the agent's private cache directory, outside the user's output folder. Audit only when the cache is stale or cleanup is requested. First use the dry run to identify candidate directories; check each for local changes and commits not yet pushed to its upstream. A clean working tree alone does not prove a failed push was recovered. Preserve any candidate with pending work, an unknown upstream or another operation still using it.
 
 ```sh
 python <script> cache-clean --project-id PROJECT_ID --dry-run
